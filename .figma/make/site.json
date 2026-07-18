@@ -1,0 +1,17 @@
+{
+  "title": "Journal",
+  "description": "A journaling web app",
+  "language": "en",
+  "robots": { "index": true },
+  "icons": { "icon": "/favicon.ico" },
+  "openGraph": { "image": "/social.png" },
+  "analytics": { "googleAnalyticsId": "" },
+  "customScripts": {
+    "headStart": "",
+    "headEnd": "",
+    "bodyStart": "",
+    "bodyEnd": ""
+  },
+  "accessibility": { "addBypassLinks": true }
+}
+
