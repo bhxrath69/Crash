@@ -1054,6 +1054,27 @@ function MobileApp({ entries, onAddEntry, draft, onRestore, onDiscard }: {
   const [calOpen, setCalOpen] = useState(false)
   const [dateFilter, setDateFilter] = useState<string | null>(null)
 
+  // ── Todo list state (shared localStorage key with DesktopApp) ─────────────
+  interface TodoItem { id: string; text: string; done: boolean }
+  const [todos, setTodos] = useState<TodoItem[]>(() => {
+    try { const r = localStorage.getItem('journal_todos'); return r ? JSON.parse(r) : [] } catch { return [] }
+  })
+  const [newTodo, setNewTodo] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editText, setEditText] = useState('')
+
+  useEffect(() => { localStorage.setItem('journal_todos', JSON.stringify(todos)) }, [todos])
+
+  function addTodo() {
+    if (!newTodo.trim()) return
+    setTodos(prev => [...prev, { id: Math.random().toString(36).slice(2), text: newTodo.trim(), done: false }])
+    setNewTodo('')
+  }
+  function toggleTodo(id: string) { setTodos(prev => prev.map(t => t.id === id ? { ...t, done: !t.done } : t)) }
+  function deleteTodo(id: string) { setTodos(prev => prev.filter(t => t.id !== id)) }
+  function startEdit(t: TodoItem) { setEditingId(t.id); setEditText(t.text) }
+  function commitEdit(id: string) { setTodos(prev => prev.map(t => t.id === id ? { ...t, text: editText.trim() || t.text } : t)); setEditingId(null) }
+
   if (screen === 'recovery' && draft) {
     return <RecoveryScreen draft={draft} onRestore={() => { onRestore(); setScreen('new-entry') }} onDiscard={() => { onDiscard(); setScreen('home') }} />
   }
@@ -1161,6 +1182,83 @@ function MobileApp({ entries, onAddEntry, draft, onRestore, onDiscard }: {
                   }}
                 >{a.label}</button>
               ))}
+            </div>
+
+            {/* Tasks */}
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 9, color: C.dim, letterSpacing: '0.15em', marginBottom: 10 }}>TASKS</div>
+            <div style={{ border: `2px solid ${C.border}`, borderRadius: 8, overflow: 'hidden', marginBottom: 24 }}>
+              {todos.length === 0 && (
+                <div style={{ padding: '14px 16px', fontSize: 12, color: C.dim, fontStyle: 'italic' }}>No tasks yet</div>
+              )}
+              {todos.map(t => (
+                <div key={t.id} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', alignItems: 'center', borderBottom: `1px solid ${C.border}`, background: C.paper }}>
+                  <div style={{ padding: '10px 12px' }}>
+                    {editingId === t.id ? (
+                      <input
+                        autoFocus
+                        value={editText}
+                        onChange={e => setEditText(e.target.value)}
+                        onBlur={() => commitEdit(t.id)}
+                        onKeyDown={e => { if (e.key === 'Enter') commitEdit(t.id); if (e.key === 'Escape') setEditingId(null) }}
+                        style={{
+                          width: '100%', background: 'transparent',
+                          borderTop: 'none', borderLeft: 'none', borderRight: 'none', borderBottom: `2px solid ${C.yellow}`,
+                          outline: 'none', color: C.white,
+                          fontFamily: "'DM Sans', sans-serif", fontSize: 13,
+                          caretColor: C.yellow,
+                        }}
+                      />
+                    ) : (
+                      <span
+                        onClick={() => startEdit(t)}
+                        style={{
+                          fontSize: 13, color: t.done ? C.dim : C.white,
+                          textDecoration: t.done ? 'line-through' : 'none',
+                          fontFamily: "'DM Sans', sans-serif",
+                        }}
+                      >{t.text}</span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => toggleTodo(t.id)}
+                    style={{
+                      width: 22, height: 22, marginRight: 6,
+                      border: `2px solid ${t.done ? C.green : C.border}`,
+                      background: t.done ? C.green : 'transparent',
+                      color: t.done ? '#000' : C.dim, fontSize: 10, fontWeight: 900,
+                      borderRadius: 6,
+                    }}
+                  >{t.done ? '✓' : ''}</button>
+                  <button
+                    onClick={() => deleteTodo(t.id)}
+                    style={{ background: 'none', border: 'none', color: C.dim, fontSize: 16, padding: '0 10px 0 0' }}
+                  >×</button>
+                </div>
+              ))}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px', background: C.panel }}>
+                <input
+                  value={newTodo}
+                  onChange={e => setNewTodo(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && addTodo()}
+                  placeholder="new task... (enter to add)"
+                  style={{
+                    background: 'transparent', border: 'none', outline: 'none',
+                    padding: '12px', color: C.white,
+                    fontFamily: "'DM Sans', sans-serif", fontSize: 13,
+                    caretColor: C.yellow,
+                  }}
+                />
+                <button
+                  onClick={addTodo}
+                  disabled={!newTodo.trim()}
+                  style={{
+                    margin: '8px', background: newTodo.trim() ? C.yellow : C.border,
+                    border: 'none', color: newTodo.trim() ? '#000' : C.dim,
+                    fontFamily: "'Orbitron', sans-serif", fontSize: 9, fontWeight: 900,
+                    borderRadius: 6,
+                  }}
+                >ADD</button>
+              </div>
             </div>
 
             {/* Recent */}
