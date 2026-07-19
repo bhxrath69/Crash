@@ -31,6 +31,22 @@ export async function checkHealth(): Promise<boolean> {
   return _connected
 }
 
+// ── crash recovery status ───────────────────────────────────────────────────
+
+export interface RecoveryStatus {
+  replayedOnLastStartup: number
+}
+
+export async function fetchRecoveryStatus(): Promise<RecoveryStatus | null> {
+  try {
+    const res = await fetch(`${BASE}/api/recovery-status`, { signal: AbortSignal.timeout(1500) })
+    if (!res.ok) return null
+    return await res.json()
+  } catch {
+    return null
+  }
+}
+
 // ── entries ───────────────────────────────────────────────────────────────────
 
 export async function fetchEntries(): Promise<Entry[]> {

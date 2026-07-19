@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { fetchRecoveryStatus, fetchEntries, saveEntry, checkHealth } from './api'
 
 // ─── Palette — 5-colour Galaxy ────────────────────────────────────────────────
 // #E70D98  hot magenta  · #991FA6  deep violet  · #F040B8  neon pink
@@ -622,6 +623,32 @@ function RecoveryScreen({ draft, onRestore, onDiscard }: {
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ─── WAL Recovery Banner (backend crash recovery, separate from the
+// client-side unsaved-draft recovery above) ────────────────────────────────
+function WalRecoveryBanner({ count, onDismiss }: { count: number; onDismiss: () => void }) {
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 999,
+      background: C.yellow, color: '#000',
+      padding: '10px 16px',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
+      fontFamily: "'DM Mono', monospace", fontSize: 12,
+    }}>
+      <span>
+        ⚠ Recovered from an unexpected shutdown — {count} {count === 1 ? 'entry was' : 'entries were'} restored from the crash log.
+      </span>
+      <button
+        onClick={onDismiss}
+        style={{
+          background: 'transparent', border: '1px solid #000', color: '#000',
+          fontFamily: "'DM Mono', monospace", fontSize: 11, cursor: 'pointer',
+          padding: '2px 8px', borderRadius: 4,
+        }}
+      >DISMISS</button>
     </div>
   )
 }
@@ -1266,6 +1293,20 @@ export default function App() {
     } catch { return null }
   })
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768)
+  const [walReplayCount, setWalReplayCount] = useState<number | null>(null)
+
+  useEffect(() => {
+    checkHealth().then(() => {
+      fetchEntries().then(loaded => {
+        if (loaded.length > 0) setEntries(loaded)
+      })
+      fetchRecoveryStatus().then(status => {
+        if (status && status.replayedOnLastStartup > 0) {
+          setWalReplayCount(status.replayedOnLastStartup)
+        }
+      })
+    })
+  }, [])
 
   useEffect(() => {
     const fn = () => setIsMobile(window.innerWidth < 768)
@@ -1275,13 +1316,27 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem('journal_entries', JSON.stringify(entries)) }, [entries])
 
-  function addEntry(e: Entry) { setEntries(prev => [e, ...prev]) }
+  function addEntry(e: Entry) {
+    setEntries(prev => [e, ...prev]) // optimistic UI update
+    saveEntry(e).then(saved => {
+      // If the backend assigned different fields (e.g. it generated the id
+      // server-side), reconcile the optimistic entry with the saved one.
+      setEntries(prev => prev.map(existing => existing.id === e.id ? saved : existing))
+    })
+  }
   function handleRestore() { setDraft(null) }
   function handleDiscard() { localStorage.removeItem('unsaved_draft'); setDraft(null) }
 
   const shared = { entries, onAddEntry: addEntry, draft, onRestore: handleRestore, onDiscard: handleDiscard }
 
-  return isMobile
-    ? <MobileApp {...shared} />
-    : <DesktopApp {...shared} />
+  return (
+    <>
+      {walReplayCount !== null && (
+        <WalRecoveryBanner count={walReplayCount} onDismiss={() => setWalReplayCount(null)} />
+      )}
+      {isMobile
+        ? <MobileApp {...shared} />
+        : <DesktopApp {...shared} />}
+    </>
+  )
 }

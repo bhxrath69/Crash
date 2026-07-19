@@ -1,17 +1,8 @@
 {
-  "title": "Journal",
-  "description": "A journaling web app",
+  "title": "Portable Journal",
+  "description": "A cross-platform, USB-portable journaling app with a custom C storage engine, Write-Ahead Logging, and crash recovery.",
   "language": "en",
-  "robots": { "index": true },
-  "icons": { "icon": "/favicon.ico" },
-  "openGraph": { "image": "/social.png" },
-  "analytics": { "googleAnalyticsId": "" },
-  "customScripts": {
-    "headStart": "",
-    "headEnd": "",
-    "bodyStart": "",
-    "bodyEnd": ""
-  },
-  "accessibility": { "addBypassLinks": true }
+  "robots": {
+    "index": false
+  }
 }
-
