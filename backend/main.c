@@ -1,8 +1,13 @@
 /*
  * main.c — Journal HTTP API server
  *
- * Exposes a minimal REST API consumed by the React frontend.
- * Swap db_sqlite.c for your own db.h implementation to use a custom database.
+ * Exposes a minimal REST API consumed by the React frontend, and serves
+ * the built frontend (dist/) directly so this can run as a standalone
+ * portable app — no `npm run dev` needed on the target machine.
+ *
+ * Storage and static files are resolved RELATIVE TO THE EXECUTABLE'S OWN
+ * LOCATION, not the current working directory — this is what makes it
+ * safe to double-click from any USB drive letter/mount point on any OS.
  *
  * Build:  make
  * Run:    ./journal [port]   (default port 8080)
@@ -12,26 +17,111 @@
  *   GET    /api/entries         → JSON array of entries
  *   POST   /api/entries         → create entry, returns created entry
  *   DELETE /api/entries/{id}    → delete entry, returns {"ok":true}
+ *   GET    /api/recovery-status → WAL replay count from last startup
+ *   GET    /*                   → serves dist/ (the built frontend)
  *   OPTIONS *                   → CORS preflight (204)
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include <stdint.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <time.h>
-#include <sys/time.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include "db.h"
+
+#if defined(_WIN32)
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #include <windows.h>
+  #include <direct.h>
+  #include <stdint.h>
+  #include <fcntl.h>
+  #include <io.h>
+  typedef int socklen_t;
+  #define CLOSESOCK closesocket
+  #define SOCK_READ(fd, buf, len)  recv((fd), (buf), (int)(len), 0)
+  #define SOCK_WRITE(fd, buf, len) send((fd), (buf), (int)(len), 0)
+  #ifndef O_RDONLY
+    #define O_RDONLY _O_RDONLY
+  #endif
+  #define open  _open
+  #define close _close
+  #define read  _read
+#elif defined(__APPLE__)
+  #include <mach-o/dyld.h>
+  #include <unistd.h>
+  #include <fcntl.h>
+  #include <sys/time.h>
+  #include <sys/socket.h>
+  #include <sys/types.h>
+  #include <netinet/in.h>
+  #include <arpa/inet.h>
+  #define CLOSESOCK close
+  #define SOCK_READ(fd, buf, len)  recv((fd), (buf), (len), 0)
+  #define SOCK_WRITE(fd, buf, len) send((fd), (buf), (len), 0)
+#else
+  #include <unistd.h>
+  #include <fcntl.h>
+  #include <sys/time.h>
+  #include <sys/socket.h>
+  #include <sys/types.h>
+  #include <netinet/in.h>
+  #include <arpa/inet.h>
+  #define CLOSESOCK close
+  #define SOCK_READ(fd, buf, len)  recv((fd), (buf), (len), 0)
+  #define SOCK_WRITE(fd, buf, len) send((fd), (buf), (len), 0)
+#endif
 
 #define DEFAULT_PORT  8080
 #define RECV_BUF_SIZE 131072   /* 128 KB — enough for large journal bodies */
 #define RESP_BUF_SIZE 4194304  /* 4 MB — enough for a full entry list      */
+
+/* Resolved once at startup in main(): the executable's own directory,
+ * the database path inside <exe_dir>/data/, and the frontend directory
+ * at <exe_dir>/dist/. Everything is relative to the executable, not the
+ * current working directory, so this runs correctly no matter where the
+ * USB drive is mounted or which folder you double-click from. */
+static char g_exe_dir[4096];
+static char g_data_db_path[4200];
+static char g_dist_dir[4200];
+
+/* Fill out_dir (size out_dir_len) with the directory containing the
+ * running executable, cross-platform, no trailing slash. */
+static void get_exe_dir(char *out_dir, size_t out_dir_len) {
+    char path[4096];
+    size_t n = 0;
+
+#if defined(_WIN32)
+    DWORD len = GetModuleFileNameA(NULL, path, sizeof(path));
+    n = (len > 0) ? (size_t)len : 0;
+#elif defined(__APPLE__)
+    uint32_t size = sizeof(path);
+    if (_NSGetExecutablePath(path, &size) != 0) n = 0;
+    else n = strlen(path);
+#else /* Linux */
+    ssize_t r = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    n = (r > 0) ? (size_t)r : 0;
+#endif
+
+    if (n == 0) {
+        /* Fallback: current directory, if we somehow couldn't resolve
+         * the executable path on this platform. */
+        snprintf(out_dir, out_dir_len, ".");
+        return;
+    }
+    path[n] = '\0';
+
+    /* Strip the filename, keep the directory. */
+    for (size_t i = n; i > 0; i--) {
+        if (path[i - 1] == '/' || path[i - 1] == '\\') {
+            path[i - 1] = '\0';
+            break;
+        }
+    }
+    snprintf(out_dir, out_dir_len, "%s", path);
+}
 
 /* ── UUID-style id generation ─────────────────────────────────────────────── */
 
@@ -134,15 +224,15 @@ static void send_response(int sock, int status, const char *status_text, const c
         "\r\n",
         status, status_text, strlen(body), CORS_HEADERS);
 
-    write(sock, header, hlen);
-    write(sock, body, strlen(body));
+    SOCK_WRITE(sock, header, hlen);
+    SOCK_WRITE(sock, body, (int)strlen(body));
 }
 
 static void send_preflight(int sock) {
     char resp[512];
     int n = snprintf(resp, sizeof(resp),
         "HTTP/1.1 204 No Content\r\n%sConnection: close\r\n\r\n", CORS_HEADERS);
-    write(sock, resp, n);
+    SOCK_WRITE(sock, resp, n);
 }
 
 /* ── Request parsing ──────────────────────────────────────────────────────── */
@@ -262,6 +352,74 @@ static void handle_delete_entry(int sock, const char *id) {
     send_response(sock, 200, "OK", "{\"ok\":true}");
 }
 
+static const char *content_type_for(const char *path) {
+    const char *dot = strrchr(path, '.');
+    if (!dot) return "application/octet-stream";
+    if (strcmp(dot, ".html") == 0) return "text/html; charset=utf-8";
+    if (strcmp(dot, ".js")   == 0) return "application/javascript; charset=utf-8";
+    if (strcmp(dot, ".css")  == 0) return "text/css; charset=utf-8";
+    if (strcmp(dot, ".json") == 0) return "application/json; charset=utf-8";
+    if (strcmp(dot, ".svg")  == 0) return "image/svg+xml";
+    if (strcmp(dot, ".png")  == 0) return "image/png";
+    if (strcmp(dot, ".ico")  == 0) return "image/x-icon";
+    if (strcmp(dot, ".txt")  == 0) return "text/plain; charset=utf-8";
+    return "application/octet-stream";
+}
+
+/* Serve a file from dist/, falling back to dist/index.html for unknown
+ * routes (so a refresh on a client-side route still loads the app). */
+static void handle_static(int sock, const char *req_path) {
+    char rel[600];
+    if (strcmp(req_path, "/") == 0) {
+        snprintf(rel, sizeof(rel), "/index.html");
+    } else {
+        snprintf(rel, sizeof(rel), "%s", req_path);
+    }
+
+    char full_path[4800];
+    snprintf(full_path, sizeof(full_path), "%s%s", g_dist_dir, rel);
+
+    FILE *f = fopen(full_path, "rb");
+    if (!f) {
+        /* No dot in the last segment => likely a client-side route, not
+         * a missing asset. Fall back to index.html (SPA-style routing). */
+        const char *base = strrchr(rel, '/');
+        base = base ? base + 1 : rel;
+        if (!strchr(base, '.')) {
+            snprintf(full_path, sizeof(full_path), "%s/index.html", g_dist_dir);
+            f = fopen(full_path, "rb");
+        }
+    }
+    if (!f) {
+        send_response(sock, 404, "Not Found", "{\"error\":\"not found\"}");
+        return;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size < 0) { fclose(f); send_response(sock, 500, "Internal Server Error", "{\"error\":\"stat failed\"}"); return; }
+
+    char *data = malloc((size_t)size);
+    if (!data) { fclose(f); send_response(sock, 500, "Internal Server Error", "{\"error\":\"oom\"}"); return; }
+    size_t rd = fread(data, 1, (size_t)size, f);
+    fclose(f);
+
+    char header[512];
+    int hlen = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "%s"
+        "Connection: close\r\n"
+        "\r\n",
+        content_type_for(full_path), rd, CORS_HEADERS);
+
+    SOCK_WRITE(sock, header, hlen);
+    SOCK_WRITE(sock, data, (int)rd);
+    free(data);
+}
+
 static void dispatch(int sock, Request *req) {
     if (strcmp(req->method, "OPTIONS") == 0) { send_preflight(sock); return; }
 
@@ -281,15 +439,52 @@ static void dispatch(int sock, Request *req) {
         return;
     }
 
+    if (strcmp(req->method, "GET") == 0 && strncmp(req->path, "/api/", 5) != 0) {
+        handle_static(sock, req->path);
+        return;
+    }
+
     send_response(sock, 404, "Not Found", "{\"error\":\"not found\"}");
 }
 
 /* ── Main ─────────────────────────────────────────────────────────────────── */
 
-int main(int argc, char *argv[]) {
-    int port = (argc > 1) ? atoi(argv[1]) : DEFAULT_PORT;
+static void ensure_dir(const char *path) {
+#if defined(_WIN32)
+    _mkdir(path);
+#else
+    mkdir(path, 0700);
+#endif
+}
 
-    if (db_init("journal.db") != 0) {
+int main(int argc, char *argv[]) {
+    int port = DEFAULT_PORT;
+    const char *env_port = getenv("PORT");
+    if (env_port) port = atoi(env_port);
+    else if (argc > 1) port = atoi(argv[1]);
+
+#if defined(_WIN32)
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        fprintf(stderr, "WSAStartup failed\n");
+        return 1;
+    }
+#endif
+
+    get_exe_dir(g_exe_dir, sizeof(g_exe_dir));
+
+    char data_dir[4200];
+    snprintf(data_dir, sizeof(data_dir), "%s/data", g_exe_dir);
+    ensure_dir(data_dir);
+    snprintf(g_data_db_path, sizeof(g_data_db_path), "%s/journal.db", data_dir);
+    snprintf(g_dist_dir, sizeof(g_dist_dir), "%s/dist", g_exe_dir);
+
+    printf("Portable Journal starting.\n");
+    printf("  Executable dir: %s\n", g_exe_dir);
+    printf("  Database path:  %s\n", g_data_db_path);
+    printf("  Frontend dir:   %s\n", g_dist_dir);
+
+    if (db_init(g_data_db_path) != 0) {
         fprintf(stderr, "Failed to open database\n");
         return 1;
     }
@@ -298,7 +493,7 @@ int main(int argc, char *argv[]) {
     if (srv < 0) { perror("socket"); return 1; }
 
     int opt = 1;
-    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -321,9 +516,14 @@ int main(int argc, char *argv[]) {
         int cli = accept(srv, (struct sockaddr *)&cli_addr, &cli_len);
         if (cli < 0) { perror("accept"); continue; }
 
-        /* 5-second receive timeout */
+        /* 5-second receive timeout, cross-platform */
+#if defined(_WIN32)
+        DWORD tv_ms = 5000;
+        setsockopt(cli, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv_ms, sizeof(tv_ms));
+#else
         struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
         setsockopt(cli, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
 
         int n = (int)recv(cli, buf, RECV_BUF_SIZE - 1, 0);
         if (n > 0) {
@@ -333,11 +533,14 @@ int main(int argc, char *argv[]) {
             if (parse_request(buf, &req)) dispatch(cli, &req);
         }
 
-        close(cli);
+        CLOSESOCK(cli);
     }
 
     free(buf);
     db_close();
-    close(srv);
+    CLOSESOCK(srv);
+#if defined(_WIN32)
+    WSACleanup();
+#endif
     return 0;
 }
