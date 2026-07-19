@@ -14,3 +14,4 @@ test.db.checkpoint
 kill_loop_results.txt
 dist/
 node_modules/
+PortableJournal/
