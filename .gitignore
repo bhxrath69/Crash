@@ -12,3 +12,5 @@ test.db
 test.db.wal
 test.db.checkpoint
 kill_loop_results.txt
+dist/
+node_modules/
