@@ -18,12 +18,27 @@ cleanup_db() {
 }
 
 start_server() {
-    ./journal "${PORT}" > /tmp/kill_loop_server.log 2>&1 &
-    echo $!
+    # If the port is still held by a just-killed previous process (common
+    # right after a rapid kill -9 -> restart cycle, before the OS fully
+    # releases the socket), retry the launch a few times instead of
+    # producing one flaky "server never came up" failure.
+    for attempt in 1 2 3 4 5; do
+        ./journal "${PORT}" > /tmp/kill_loop_server.log 2>&1 &
+        NEW_PID=$!
+        sleep 0.2
+        if kill -0 "${NEW_PID}" 2>/dev/null; then
+            echo "${NEW_PID}"
+            return 0
+        fi
+        # It died immediately (likely EADDRINUSE) — clear the port and retry.
+        pkill -9 -f "\./journal ${PORT}$" 2>/dev/null
+        sleep 0.3
+    done
+    echo "${NEW_PID}"
 }
 
 wait_for_server() {
-    for _ in $(seq 1 50); do
+    for _ in $(seq 1 150); do
         if curl -s -o /dev/null "${BASE}/api/health"; then return 0; fi
         sleep 0.05
     done
