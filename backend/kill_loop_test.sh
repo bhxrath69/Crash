@@ -68,7 +68,8 @@ for run in $(seq 1 "${ITER}"); do
 
     # Random short delay before killing — puts the kill at an
     # unpredictable point relative to WAL/data writes.
-    sleep "0.0$((RANDOM % 20 + 1))"
+    MS=$(( (RANDOM % 800) + 200 ))
+    sleep "0.$(printf '%03d' "$MS")"
 
     kill -9 "${PID}" 2>/dev/null
     kill -9 "${FLOOD_PID}" 2>/dev/null
